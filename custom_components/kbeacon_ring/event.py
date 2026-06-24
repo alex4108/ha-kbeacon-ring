@@ -33,7 +33,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_MAC, CONF_NAME, CONF_PASSWORD, DOMAIN, SIGNAL_CONN
+from .const import CONF_MAC, CONF_NAME, CONF_PASSWORD, DOMAIN, SIGNAL_BATTERY, SIGNAL_CONN
 from .kbeacon import KBeaconSession
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,6 +55,8 @@ EVENT_TYPES = ["single", "double", "triple", "hold"]
 # Reconnect backoff bounds (seconds).
 _RECONNECT_MIN = 5
 _RECONNECT_MAX = 120
+# How often to re-read battery over the held connection (seconds).
+_BATTERY_INTERVAL = 1800
 
 
 async def async_setup_entry(
@@ -201,15 +203,37 @@ class KBeaconButtonEvent(EventEntity):
         _LOGGER.info("kbeacon button: %s connected + listening on FEA3", mac)
         self._set_connected(True)
 
+        # Read battery once on connect, then periodically (cheap; reuses the
+        # held connection). Broadcasts to the battery sensor via dispatcher.
+        await self._read_and_publish_battery(session)
+        last_batt = self.hass.loop.time()
+
         # Hold the connection until told to stop or the link drops. A
         # disconnect raises through the client; we poll liveness periodically.
         while not self._stop.is_set():
             if self._client is None or not self._client.is_connected:
                 raise RuntimeError("disconnected")
+            now = self.hass.loop.time()
+            if now - last_batt >= _BATTERY_INTERVAL:
+                await self._read_and_publish_battery(session)
+                last_batt = now
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=15)
             except asyncio.TimeoutError:
                 pass
+
+    async def _read_and_publish_battery(self, session) -> None:
+        """Read battery percent over the held connection and broadcast it."""
+        try:
+            pct = await session.read_battery()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("kbeacon button: battery read failed: %s", exc)
+            return
+        if pct is None:
+            _LOGGER.debug("kbeacon button: battery percent unavailable")
+            return
+        _LOGGER.info("kbeacon button: %s battery=%d%%", self._mac, pct)
+        async_dispatcher_send(self.hass, SIGNAL_BATTERY % self._mac, pct)
 
     @callback
     def _on_gesture(self, gesture: int, body: bytes) -> None:

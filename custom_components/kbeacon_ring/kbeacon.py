@@ -88,8 +88,27 @@ class KBeaconSession:
         if (b[0] & 0xF0) == 0x30 and len(b) >= 3:
             await self._handle_read_frame(b)
             return
-        # Device->app ack of our config WRITE: [0x20|pduTag][seq u16] — asks next chunk
+        # Device->app 0x2X frames carry BOTH write-acks AND getPara responses:
+        #   write-ack:     [0x20|pduTag][seq u16] (asks for next chunk / done)
+        #   getPara reply: [0x23][len u16][0000][0000]{json...}  (frameType 3)
+        # Distinguish by a trailing JSON body ('{' ... '}').
         if (b[0] & 0xF0) == 0x20 and len(b) >= 3:
+            body_start = b.find(b"{")
+            if body_start != -1 and b.rstrip(b"\x00").endswith(b"}"):
+                # getPara JSON response (single complete frame).
+                json_bytes = b[body_start:]
+                try:
+                    self._read_result = _json.loads(
+                        json_bytes.decode("utf-8", "replace")
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "kbeacon read: bad getPara json: %s (%s)",
+                        json_bytes, exc,
+                    )
+                    self._read_result = None
+                self._read_done.set()
+                return
             seq = struct.unpack(">H", b[1:3])[0]
             if self._json is not None and seq >= len(self._json):
                 self._cmd_done.set()
@@ -231,6 +250,53 @@ class KBeaconSession:
             self._json = None
         _LOGGER.info("kbeacon read: stype=%d result=%s", stype, self._read_result)
         return self._read_result
+
+    async def read_para(self, sub_type: int, extra: dict | None = None,
+                        timeout: float = 10.0):
+        """Read a config block using the CURRENT (kbeaconlib2) wire format.
+
+        The modern SDK's getPara uses field ``type`` (KBCfgType): 1=CommonPara,
+        2=AdvPara, 4=TriggerPara, 8=SensorPara — NOT the old ``stype`` field.
+        Sending the wrong field/value is why earlier reads returned a bare
+        ``0x23 .. 0103`` reject. CommonPara (type=1) carries ``btPt`` (battery
+        percent), ``bCap`` and the device basics.
+
+        Returns the parsed JSON dict, or None on timeout.
+        """
+        self._read_buf = ""
+        self._read_result = None
+        self._read_done.clear()
+        req = {"msg": "getPara", "type": int(sub_type)}
+        if extra:
+            req.update(extra)
+        self._json = _json.dumps(req, separators=(",", ":"))
+        _LOGGER.debug("kbeacon read_para: requesting %s", self._json)
+        await self._send_chunk(0)
+        try:
+            await asyncio.wait_for(self._read_done.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            _LOGGER.warning("kbeacon read_para: timeout for type=%d", sub_type)
+            return None
+        finally:
+            self._json = None
+        _LOGGER.debug("kbeacon read_para: type=%d result=%s", sub_type, self._read_result)
+        return self._read_result
+
+    async def read_battery(self, timeout: float = 10.0):
+        """Read battery percent (btPt) from CommonPara. None if unavailable."""
+        common = await self.read_para(1, timeout=timeout)  # 1 = CommonPara
+        if not common:
+            return None
+        bt = common.get("btPt")
+        try:
+            pct = int(bt) if bt is not None else None
+        except (TypeError, ValueError):
+            return None
+        if pct is None:
+            return None
+        # Fresh CR2477 cells read slightly over 100 on the device's scale;
+        # clamp to a sane 0..100 for HA.
+        return max(0, min(100, pct))
 
     async def write_config(self, params: dict, timeout: float = 8.0) -> None:
         """Write a config block to the tag.

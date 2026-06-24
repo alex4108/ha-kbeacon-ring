@@ -26,3 +26,6 @@ IND_UUID = "0000fea3-0000-1000-8000-00805f9b34fb"
 # Dispatcher signal: button event entity -> connection binary_sensor.
 # Formatted with the tag MAC, e.g. SIGNAL_CONN % mac.
 SIGNAL_CONN = "kbeacon_ring_conn_%s"
+
+# Dispatcher signal: event platform -> battery sensor (battery percent int).
+SIGNAL_BATTERY = "kbeacon_ring_batt_%s"
