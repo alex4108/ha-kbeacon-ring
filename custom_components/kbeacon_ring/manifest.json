@@ -1,0 +1,13 @@
+{
+  "domain": "kbeacon_ring",
+  "name": "KBeacon Ring (Blue Charm)",
+  "version": "0.1.0",
+  "documentation": "https://github.com/alex4108/ha-kbeacon-ring",
+  "issue_tracker": "https://github.com/alex4108/ha-kbeacon-ring/issues",
+  "dependencies": ["bluetooth"],
+  "after_dependencies": ["bluetooth_adapters"],
+  "codeowners": ["@alex4108"],
+  "requirements": ["bleak-retry-connector>=3.5.0"],
+  "iot_class": "local_push",
+  "config_flow": true
+}

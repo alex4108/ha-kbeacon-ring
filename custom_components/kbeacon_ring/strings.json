@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a KBeacon (Blue Charm) tag",
+        "description": "Enter the beacon's Bluetooth MAC and (optionally) its password. Factory password is sixteen zeros.",
+        "data": {
+          "mac": "Bluetooth MAC (e.g. DD:88:00:00:1E:3E)",
+          "name": "Friendly name",
+          "password": "Password (16 chars; factory = 0000000000000000)",
+          "ring_ms": "Ring duration (ms)",
+          "ring_type": "Ring type"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This beacon is already configured."
+    }
+  }
+}
