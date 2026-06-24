@@ -23,6 +23,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -57,6 +58,7 @@ async def async_setup_entry(
         [
             KBeaconChirpButton(hass, entry, cfg),
             KBeaconBlinkButton(hass, entry, cfg),
+            KBeaconArmTriggerButton(hass, entry, cfg),
         ]
     )
 
@@ -176,3 +178,113 @@ class KBeaconBlinkButton(_KBeaconRingButtonBase):
             "led_on": self._blink_led_on,
             "led_off": self._blink_led_off,
         }
+
+
+# Trigger config constants (from decompiled KBCfgTrigger).
+TR_TYPE_BUTTON = 2
+TR_ACT_ADV = 1
+TR_ACT_ALERT = 2
+TR_ACT_ADV_ALERT = TR_ACT_ADV | TR_ACT_ALERT  # broadcast AND flash on press
+TR_PARA_HOLD = 1
+TR_PARA_SINGLE = 2
+TR_PARA_DOUBLE = 4
+TR_PARA_TRIPLE = 8
+TR_PARA_ALL = TR_PARA_HOLD | TR_PARA_SINGLE | TR_PARA_DOUBLE | TR_PARA_TRIPLE
+TR_ADV_TYPE_IBEACON = 4
+TR_CFG_STYPE = 64  # KBCfgTrigger.cfgParaType()
+CAP_STYPE_COMMON = 32
+
+
+class KBeaconArmTriggerButton(_KBeaconRingButtonBase):
+    """One-shot: configure the tag so a physical button press emits an advert.
+
+    Reads the tag's capability (bCap) + current trigger config first (so we log
+    what we are about to change and confirm the button is supported), then
+    writes ``button -> Adv`` for all four gestures. After this, a physical press
+    broadcasts a burst that ``event.sophie_tag_button`` can catch passively.
+
+    Idempotent: safe to press repeatedly. Lives as a permanent maintenance
+    control (re-arm after a factory reset / battery pull).
+    """
+
+    _command_label = "Arm Button Trigger"
+    _command_slug = "arm_button_trigger"
+    _attr_icon = "mdi:button-pointer"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    async def async_press(self) -> None:
+        mac = self._mac
+        ble_device = bluetooth.async_ble_device_from_address(
+            self.hass, mac, connectable=True
+        )
+        if ble_device is None:
+            raise HomeAssistantError(
+                "No connectable BLE route to %s (tag out of range?)" % mac
+            )
+        client = await establish_connection(
+            client_class=__import__("bleak").BleakClient,
+            device=ble_device,
+            name="kbeacon-%s" % mac,
+            max_attempts=4,
+        )
+        try:
+            session = KBeaconSession(client, mac, self._cfg[CONF_PASSWORD])
+            if not await session.authenticate():
+                raise HomeAssistantError(
+                    "KBeacon auth failed for %s (wrong password?)" % mac
+                )
+
+            # 1) Capability — confirm the button exists on THIS unit.
+            common = await session.read_config(stype=CAP_STYPE_COMMON)
+            bcap = (common or {}).get("bCap")
+            if bcap is not None:
+                bits = int(bcap)
+                _LOGGER.info(
+                    "kbeacon arm: bCap=%d button=%s beep=%s acc=%s temp=%s",
+                    bits,
+                    bool(bits & 1),
+                    bool(bits & 2),
+                    bool(bits & 4),
+                    bool(bits & 8),
+                )
+                if not (bits & 1):
+                    raise HomeAssistantError(
+                        "Tag %s reports no button capability (bCap=%d)"
+                        % (mac, bits)
+                    )
+
+            # 2) Current trigger config — log so we don't silently clobber.
+            # The SDK's readTriggerConfig REQUIRES trType in the request; without
+            # it the device only sends a 0x23..0103 ack and the read times out.
+            before = await session.read_config(
+                stype=TR_CFG_STYPE, tr_type=TR_TYPE_BUTTON
+            )
+            _LOGGER.info("kbeacon arm: trigger config BEFORE = %s", before)
+
+            # 3) Arm: button -> Adv+Alert (flash AND broadcast), all gestures,
+            #    long 30s iBeacon burst so the passive proxy can't miss it.
+            params = {
+                "stype": TR_CFG_STYPE,
+                "trType": TR_TYPE_BUTTON,
+                "trAct": TR_ACT_ADV_ALERT,
+                "trPara": TR_PARA_ALL,
+                "trAType": TR_ADV_TYPE_IBEACON,
+                "trATm": 30,
+            }
+            await session.write_config(params)
+
+            # 4) Read back to confirm it stuck (with trType, the fixed read).
+            after = await session.read_config(
+                stype=TR_CFG_STYPE, tr_type=TR_TYPE_BUTTON
+            )
+            _LOGGER.info("kbeacon arm: trigger config AFTER = %s", after)
+            _LOGGER.info(
+                "kbeacon arm: %s armed (button->Adv+Alert, 30s). Press the tag "
+                "now and watch for 'kbeacon poll CHANGED' INFO lines.",
+                mac,
+            )
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass

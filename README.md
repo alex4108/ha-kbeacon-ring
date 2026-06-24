@@ -10,6 +10,8 @@ command. No cloud, no app — everything stays local.
 
 ## Features
 
+### Ring buttons
+
 Each configured tag exposes two **button** entities:
 
 | Entity | Effect | `ringType` |
@@ -24,6 +26,26 @@ third button if desired.
 > central stays connected*. The integration therefore holds the connection open for
 > the full ring window (`ringTime`) so the effect plays out completely rather than
 > producing a single flash/blip.
+
+### Physical button events ✨
+
+If your tag has a physical push-button (e.g. `BCPro`), the integration also exposes
+an **event** entity that fires on real button presses:
+
+| Entity | Event types |
+|--------|-------------|
+| **Button** (`event.<name>_button`) | `single`, `double`, `triple`, `hold` |
+
+Press the tag and `event.<name>_button` fires with the matching `event_type` —
+ready to drive any automation (find-my-phone, scene toggle, SOS, etc).
+
+> **How it works.** Button presses are **not** broadcast in advertisements — they
+> are delivered as live GATT **indications** on characteristic `FEA3`. The
+> integration holds a persistent authenticated connection, configures each gesture
+> with trigger action **Report2App**, subscribes to `FEA3`, and decodes
+> `gesture = data[0] & 0x3F` (3=hold, 4=single, 5=double, 6=triple). It reconnects
+> automatically (5→120 s backoff) if the link drops. This occupies one Bluetooth
+> proxy connection slot continuously — the necessary cost of real-time events.
 
 ## Installation (HACS)
 
@@ -59,9 +81,18 @@ Blink timing lives in `KBeaconBlinkButton._ring_kwargs()` in `button.py`:
 ## Protocol
 
 The tag exposes the KBeacon config GATT service (`FEA0`), with write characteristic
-`FEA1` and notify `FEA2`. Authentication is an MD5 challenge–response using the
-access password; the `ring` command is a chunked JSON ADU:
+`FEA1`, notify `FEA2`, and indicate `FEA3`. Authentication is an MD5
+challenge–response using the access password.
+
+**Ring** is a chunked JSON ADU on `FEA1`:
 `{"msg":"ring","ringTime":<ms>,"ringType":<0|1|2>,"ledOn":<ms>,"ledOff":<ms>}`.
+
+**Button events** are configured by writing a trigger with action `Report2App`
+(`0x10`) for each gesture, then subscribing to **indications** on `FEA3`:
+`{"msg":"cfg","trObj":[{"trIdx":0,"trType":3,"trAct":16}, ...]}`
+(`trType`: 3=hold, 4=single, 5=double, 6=triple). Each `FEA3` indication carries
+the gesture in `data[0] & 0x3F`. This follows the current vendor SDK
+([`kkmcn/android_kbeaconlib2`](https://github.com/kkmcn/android_kbeaconlib2)).
 
 ## Disclaimer
 

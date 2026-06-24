@@ -1,7 +1,7 @@
 {
   "domain": "kbeacon_ring",
   "name": "KBeacon Ring (Blue Charm)",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "documentation": "https://github.com/alex4108/ha-kbeacon-ring",
   "issue_tracker": "https://github.com/alex4108/ha-kbeacon-ring/issues",
   "dependencies": ["bluetooth"],

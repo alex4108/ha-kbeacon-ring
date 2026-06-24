@@ -19,7 +19,7 @@ import json as _json
 import logging
 import struct
 
-from .const import NOTIFY_UUID, WRITE_UUID
+from .const import IND_UUID, NOTIFY_UUID, WRITE_UUID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -201,12 +201,24 @@ class KBeaconSession:
             return False
         return not self._auth_failed
 
-    async def read_config(self, stype: int = 32, timeout: float = 10.0):
-        """Read a config block (stype 32 = common; contains bCap capability)."""
+    async def read_config(
+        self, stype: int = 32, timeout: float = 10.0, tr_type: int | None = None
+    ):
+        """Read a config block (stype 32 = common; contains bCap capability).
+
+        For the TRIGGER block (stype 64) the SDK's ``readTriggerConfig`` sends
+        ``{"msg":"getPara","stype":64,"trType":<n>}`` — it MUST include
+        ``trType`` (1=motion, 2=button), otherwise the device replies with a
+        bare ``0x23 .. 0103`` ack and no data report (the timeout we kept
+        hitting). Pass ``tr_type`` to read a specific trigger's config. The
+        device returns the trigger objects under a ``trObj`` JSON array.
+        """
         self._read_buf = ""
         self._read_result = None
         self._read_done.clear()
         req = {"msg": "getPara", "stype": int(stype)}
+        if tr_type is not None:
+            req["trType"] = int(tr_type)
         self._json = _json.dumps(req, separators=(",", ":"))
         _LOGGER.debug("kbeacon read: requesting stype=%d json=%s", stype, self._json)
         await self._send_chunk(0)
@@ -219,6 +231,85 @@ class KBeaconSession:
             self._json = None
         _LOGGER.info("kbeacon read: stype=%d result=%s", stype, self._read_result)
         return self._read_result
+
+    async def write_config(self, params: dict, timeout: float = 8.0) -> None:
+        """Write a config block to the tag.
+
+        Per the decompiled SDK (KBCfgHandler.objectsToParaDict), a config
+        change is a single JSON object ``{"msg":"cfg","stype":<bitmask>,...}``
+        carrying the changed fields, sent over the SAME chunked ADU write path
+        the ring command proves out. ``stype`` is the OR of each touched cfg
+        block's ``cfgParaType`` (trigger block = 64).
+
+        ``params`` should already contain the cfg fields (e.g. trType/trAct/
+        trPara/trAType/trATm) and the correct ``stype``; ``msg`` is added here.
+        """
+        self._cmd_done.clear()
+        body = {"msg": "cfg"}
+        body.update(params)
+        self._json = _json.dumps(body, separators=(",", ":"))
+        _LOGGER.info("kbeacon cfg: writing %s", self._json)
+        await self._send_chunk(0)
+        try:
+            await asyncio.wait_for(self._cmd_done.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            _LOGGER.debug("kbeacon cfg: no explicit completion ack (likely fine)")
+        finally:
+            self._json = None
+
+    async def write_trigger_report2app(
+        self, gestures: list[int], timeout: float = 8.0
+    ) -> None:
+        """Configure button gestures to report live events to the app (FEA3).
+
+        Modern kbeaconlib2 wire format: triggers go in a ``trObj`` ARRAY, each
+        ``{"trIdx":i,"trType":<gesture>,"trAct":16}`` where 16 = Report2App.
+        gesture KBTriggerType: 3=long 4=single 5=double 6=triple. This is what
+        makes a press emit an INDICATION on FEA3 (vs Advertisement=1 which only
+        broadcasts). Sent over the same chunked FEA1 path; device acks on FEA2.
+        """
+        tr_obj = [
+            {"trIdx": i, "trType": int(g), "trAct": 0x10}
+            for i, g in enumerate(gestures)
+        ]
+        self._cmd_done.clear()
+        body = {"msg": "cfg", "trObj": tr_obj}
+        self._json = _json.dumps(body, separators=(",", ":"))
+        _LOGGER.info("kbeacon trigger: writing %s", self._json)
+        await self._send_chunk(0)
+        try:
+            await asyncio.wait_for(self._cmd_done.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            _LOGGER.debug("kbeacon trigger: no explicit completion ack (likely fine)")
+        finally:
+            self._json = None
+
+    async def subscribe_button_events(self, on_gesture) -> None:
+        """Start INDICATIONS on FEA3 and decode button gestures.
+
+        Each indication: ``data[0] & 0x3F`` == KBTriggerType gesture; the rest
+        is the event body. ``on_gesture(gesture_int, body_bytes)`` is invoked.
+        bleak's start_notify handles the indication CCCD automatically.
+        """
+        self._on_gesture = on_gesture
+
+        def _ind_cb(_char, data: bytearray) -> None:
+            if not data:
+                return
+            gesture = data[0] & 0x3F
+            body = bytes(data[1:])
+            _LOGGER.info(
+                "kbeacon FEA3 indication: gesture=%d raw=%s",
+                gesture,
+                bytes(data).hex(),
+            )
+            try:
+                on_gesture(gesture, body)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("kbeacon FEA3: gesture handler error: %s", exc)
+
+        await self._client.start_notify(IND_UUID, _ind_cb)
+        _LOGGER.info("kbeacon FEA3: subscribed to button indications")
 
     async def ring(
         self,
