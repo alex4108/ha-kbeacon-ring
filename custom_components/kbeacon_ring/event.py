@@ -92,10 +92,17 @@ class KBeaconButtonEvent(EventEntity):
         )
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._pause = asyncio.Event()  # set => listener yields the BLE slot
         self._client = None
+        self._coordinator = cfg.get("coordinator")
 
     async def async_added_to_hass(self) -> None:
         self._stop.clear()
+        self._pause.clear()
+        if self._coordinator is not None:
+            self._coordinator.register_listener(
+                self._yield_slot, self._resume_slot
+            )
         self._task = self.hass.async_create_background_task(
             self._run(), name="kbeacon-button-%s" % self._mac
         )
@@ -104,14 +111,34 @@ class KBeaconButtonEvent(EventEntity):
     @callback
     def _cleanup(self) -> None:
         self._stop.set()
+        if self._coordinator is not None:
+            self._coordinator.unregister_listener()
         if self._task is not None:
             self._task.cancel()
             self._task = None
+
+    async def _yield_slot(self) -> None:
+        """Coordinator asked us to release the BLE slot for a ring command."""
+        _LOGGER.info("kbeacon button: yielding BLE slot to a command")
+        self._pause.set()
+        await self._disconnect()
+
+    @callback
+    def _resume_slot(self) -> None:
+        """Command finished; allow the listener to reconnect."""
+        _LOGGER.info("kbeacon button: slot released back to listener")
+        self._pause.clear()
 
     async def _run(self) -> None:
         """Maintain an authed connection + FEA3 subscription, with reconnect."""
         backoff = _RECONNECT_MIN
         while not self._stop.is_set():
+            # If a command holds the slot, wait until it's released.
+            if self._pause.is_set():
+                while self._pause.is_set() and not self._stop.is_set():
+                    await asyncio.sleep(0.5)
+                backoff = _RECONNECT_MIN
+                continue
             try:
                 await self._connect_and_listen()
                 backoff = _RECONNECT_MIN  # clean exit resets backoff
@@ -128,6 +155,7 @@ class KBeaconButtonEvent(EventEntity):
                 await self._disconnect()
             if self._stop.is_set():
                 break
+            # Wait for backoff OR stop. Pause is re-checked at loop top.
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=backoff)
             except asyncio.TimeoutError:

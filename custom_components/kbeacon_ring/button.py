@@ -79,6 +79,7 @@ class _KBeaconRingButtonBase(ButtonEntity):
         self._cfg = cfg
         self._mac: str = cfg[CONF_MAC]
         self._name: str = cfg[CONF_NAME]
+        self._coordinator = cfg.get("coordinator")
         self._attr_name = self._command_label
         self._attr_unique_id = "%s_%s" % (
             self._mac.replace(":", "").lower(),
@@ -102,6 +103,15 @@ class _KBeaconRingButtonBase(ButtonEntity):
         return kwargs
 
     async def async_press(self) -> None:
+        # Yield the single BLE slot from the button-event listener (if any) for
+        # the duration of this command, then let it reconnect afterwards.
+        if self._coordinator is not None:
+            async with self._coordinator.command_slot():
+                await self._do_ring()
+        else:
+            await self._do_ring()
+
+    async def _do_ring(self) -> None:
         mac = self._mac
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, mac, connectable=True
@@ -213,6 +223,13 @@ class KBeaconArmTriggerButton(_KBeaconRingButtonBase):
     _attr_entity_category = EntityCategory.CONFIG
 
     async def async_press(self) -> None:
+        if self._coordinator is not None:
+            async with self._coordinator.command_slot():
+                await self._do_arm()
+        else:
+            await self._do_arm()
+
+    async def _do_arm(self) -> None:
         mac = self._mac
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, mac, connectable=True

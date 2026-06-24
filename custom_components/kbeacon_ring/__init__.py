@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import CONF_MAC, DOMAIN
+from .coordinator import KBeaconCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,7 +36,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = dict(entry.data)
+    cfg = dict(entry.data)
+    # Shared single-BLE-slot coordinator (listener yields to ring commands).
+    cfg["coordinator"] = KBeaconCoordinator()
+    hass.data[DOMAIN][entry.entry_id] = cfg
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
