@@ -30,9 +30,10 @@ from homeassistant.components.event import EventDeviceClass, EventEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_MAC, CONF_NAME, CONF_PASSWORD, DOMAIN
+from .const import CONF_MAC, CONF_NAME, CONF_PASSWORD, DOMAIN, SIGNAL_CONN
 from .kbeacon import KBeaconSession
 
 _LOGGER = logging.getLogger(__name__)
@@ -133,6 +134,11 @@ class KBeaconButtonEvent(EventEntity):
                 pass
             backoff = min(backoff * 2, _RECONNECT_MAX)
 
+    @callback
+    def _set_connected(self, connected: bool) -> None:
+        """Broadcast connection state to the connection binary_sensor."""
+        async_dispatcher_send(self.hass, SIGNAL_CONN % self._mac, connected)
+
     async def _connect_and_listen(self) -> None:
         mac = self._mac
         ble_device = bluetooth.async_ble_device_from_address(
@@ -165,6 +171,7 @@ class KBeaconButtonEvent(EventEntity):
 
         await session.subscribe_button_events(self._on_gesture)
         _LOGGER.info("kbeacon button: %s connected + listening on FEA3", mac)
+        self._set_connected(True)
 
         # Hold the connection until told to stop or the link drops. A
         # disconnect raises through the client; we poll liveness periodically.
@@ -187,6 +194,7 @@ class KBeaconButtonEvent(EventEntity):
         self.async_write_ha_state()
 
     async def _disconnect(self) -> None:
+        self._set_connected(False)
         client, self._client = self._client, None
         if client is not None:
             try:
