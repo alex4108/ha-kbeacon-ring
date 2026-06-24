@@ -1,0 +1,128 @@
+# KBeacon "Sophie Tag" button — starter automations
+#
+# Entity that fires on physical button presses:
+#   event.sophie_tag_button   (event_type: single | double | triple | hold)
+#
+# HOW TO USE
+#   - In HA: Settings → Automations → ⋮ → Edit in YAML, and paste one of these,
+#     OR drop the whole file's contents into your automations.yaml and reload.
+#   - Each automation triggers on the event entity and branches on the
+#     `event_type` attribute. Swap the actions for whatever you want.
+#
+# The trigger pattern (reused below):
+#   trigger: state
+#   entity_id: event.sophie_tag_button
+#   not_to: [unavailable, unknown]      # ignore startup/availability flips
+#   then check trigger.to_state.attributes.event_type in a choose/condition.
+#
+# Tip: the event entity's STATE is a timestamp that changes on every press, so
+# `state` triggers fire even for the same gesture pressed twice in a row.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1) SINGLE press → ping Sophie's phone ("find my phone" / "I'm thinking of you")
+# ─────────────────────────────────────────────────────────────────────────────
+- alias: "Sophie Tag — single press → ping phone"
+  id: sophie_tag_single_ping_phone
+  triggers:
+    - trigger: state
+      entity_id: event.sophie_tag_button
+      attribute: event_type
+      to: single
+  actions:
+    - action: notify.alex          # ← change to Sophie's notify service if she has one
+      data:
+        title: "Sophie pressed her tag"
+        message: "Single press 👋"
+  mode: single
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2) DOUBLE press → toggle a light / run a scene
+# ─────────────────────────────────────────────────────────────────────────────
+- alias: "Sophie Tag — double press → toggle living room light"
+  id: sophie_tag_double_toggle_light
+  triggers:
+    - trigger: state
+      entity_id: event.sophie_tag_button
+      attribute: event_type
+      to: double
+  actions:
+    - action: light.toggle
+      target:
+        entity_id: light.living_room   # ← change to a real light entity
+  mode: single
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3) TRIPLE press → "I'm leaving / arriving" announcement + chirp confirms
+# ─────────────────────────────────────────────────────────────────────────────
+- alias: "Sophie Tag — triple press → announce + chirp confirm"
+  id: sophie_tag_triple_announce
+  triggers:
+    - trigger: state
+      entity_id: event.sophie_tag_button
+      attribute: event_type
+      to: triple
+  actions:
+    - action: notify.all_devices
+      data:
+        title: "Sophie Tag"
+        message: "Triple press — heads up!"
+    # chirp the tag back so she knows it registered:
+    - action: button.press
+      target:
+        entity_id: button.sophie_tag_chirp
+  mode: single
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4) HOLD (long press) → SOS / panic: notify everyone, flash a light
+# ─────────────────────────────────────────────────────────────────────────────
+- alias: "Sophie Tag — hold → SOS"
+  id: sophie_tag_hold_sos
+  triggers:
+    - trigger: state
+      entity_id: event.sophie_tag_button
+      attribute: event_type
+      to: hold
+  actions:
+    - action: notify.all_devices
+      data:
+        title: "🚨 SOS from Sophie's tag"
+        message: "Long-press (hold) detected at {{ now().strftime('%H:%M') }}."
+    - action: light.turn_on
+      target:
+        entity_id: light.living_room   # ← change to a real light
+      data:
+        flash: long
+        color_name: red
+  mode: single
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALTERNATIVE: one automation handling all four gestures via choose
+# (delete the four above if you prefer this single consolidated form)
+# ─────────────────────────────────────────────────────────────────────────────
+- alias: "Sophie Tag — all gestures (consolidated)"
+  id: sophie_tag_all_gestures
+  triggers:
+    - trigger: state
+      entity_id: event.sophie_tag_button
+      not_to: [unavailable, unknown]
+  variables:
+    gesture: "{{ trigger.to_state.attributes.event_type }}"
+  actions:
+    - choose:
+        - conditions: "{{ gesture == 'single' }}"
+          sequence:
+            - action: notify.alex
+              data: { message: "Sophie: single press 👋" }
+        - conditions: "{{ gesture == 'double' }}"
+          sequence:
+            - action: light.toggle
+              target: { entity_id: light.living_room }
+        - conditions: "{{ gesture == 'triple' }}"
+          sequence:
+            - action: button.press
+              target: { entity_id: button.sophie_tag_chirp }
+        - conditions: "{{ gesture == 'hold' }}"
+          sequence:
+            - action: notify.all_devices
+              data: { title: "🚨 SOS", message: "Sophie long-pressed her tag" }
+  mode: queued
